@@ -58,7 +58,7 @@ class G1LocomotionSceneCfg(InteractiveSceneCfg):
 
     # sensors
     contact_forces = ContactSensorCfg(
-        prim_path="{ENV_REGEX_NS}/Robot/.*",,
+        prim_path="{ENV_REGEX_NS}/Robot/.*",
         history_length=3,
         track_air_time=True,
     )
@@ -220,28 +220,72 @@ class EventCfg:
 class RewardsCfg:
     """Reward terms for the MDP."""
 
-    # (1) Constant running reward
-    alive = RewTerm(func=mdp.is_alive, weight=1.0)
-    # (2) Failure penalty
-    terminating = RewTerm(func=mdp.is_terminated, weight=-2.0)
-    # (3) Primary task: keep pole upright
-    pole_pos = RewTerm(
+    # --task
+    track_lin_vel_xy_exp = RewTerm(
+        func=mdp.track_lin_vel_xy_exp, 
+        weight=1.0, 
+        params={
+            "command_name": "base_velocity", 
+            "std": math.sqrt(0.25)
+            }
+    )
+
+    track_ang_vel_z_exp = RewTerm(
+        func=mdp.track_ang_vel_z_exp,
+        weight=0.5,
+        params={
+            "command_name": "base_velocity", 
+            "std": math.sqrt(0.25)
+            }
+    )
+
+
+    # --pentalties
+    lin_vel_z_l2 = RewTerm(
+        func=mdp.lin_vel_z_l2,
+        weight=-2.0,
+    )
+
+    ang_vel_xy_l2 = RewTerm(
+        func=mdp.ang_vel_xy_l2,
+        weight=-0.05,
+    )
+
+    joint_torques_l2 = RewTerm(
         func=mdp.joint_pos_target_l2,
-        weight=-1.0,
-        params={"asset_cfg": SceneEntityCfg("robot", joint_names=["cart_to_pole"]), "target": 0.0},
+        weight=-1.0e-5,
     )
-    # (4) Shaping tasks: lower cart velocity
-    cart_vel = RewTerm(
-        func=mdp.joint_vel_l1,
+
+    joint_acc_l2 = RewTerm(
+        func=mdp.joint_acc_l2,
+        weight=-2.5e-7,
+    )
+
+    action_rate_l2 = RewTerm(
+        func=mdp.action_rate_l2,
         weight=-0.01,
-        params={"asset_cfg": SceneEntityCfg("robot", joint_names=["slider_to_cart"])},
     )
-    # (5) Shaping tasks: lower pole angular velocity
-    pole_vel = RewTerm(
-        func=mdp.joint_vel_l1,
-        weight=-0.005,
-        params={"asset_cfg": SceneEntityCfg("robot", joint_names=["cart_to_pole"])},
+
+    feet_air_time = RewTerm(
+        func=mdp.feet_air_time_positive_biped,
+        weight=0.125,
+        params={
+            "sensor_cfg": SceneEntityCfg("contact_forces", body_names=".*foot.*"), # check the body name
+            "command_name": "base_velocity",
+            "threshold": 0.5,
+        }
     )
+
+    undersired_contacts = RewTerm(
+        func=mdp.undesired_contacts,
+        weight=-1.0,
+        params={
+            "sensor_cfg": SceneEntityCfg("contact_forces", body_names=".*THIGH"), # check the body name
+            "threshold": 1.0,
+        }
+    )
+
+
 
 
 @configclass
@@ -250,10 +294,10 @@ class TerminationsCfg:
 
     # (1) Time out
     time_out = DoneTerm(func=mdp.time_out, time_out=True)
-    # (2) Cart out of bounds
-    cart_out_of_bounds = DoneTerm(
-        func=mdp.joint_pos_out_of_manual_limit,
-        params={"asset_cfg": SceneEntityCfg("robot", joint_names=["slider_to_cart"]), "bounds": (-3.0, 3.0)},
+    # (2) agent fall
+    base_contact = DoneTerm(
+        func=mdp.illegal_contact,
+        params={"sensor_cfg": SceneEntityCfg("contact_forces", body_names="base")},
     )
 
 
@@ -269,19 +313,28 @@ class G1LocomotionEnvCfg(ManagerBasedRLEnvCfg):
     # Basic settings
     observations: ObservationsCfg = ObservationsCfg()
     actions: ActionsCfg = ActionsCfg()
-    events: EventCfg = EventCfg()
+    commands: CommandsCfg = CommandsCfg()
     # MDP settings
     rewards: RewardsCfg = RewardsCfg()
     terminations: TerminationsCfg = TerminationsCfg()
+    events: EventCfg = EventCfg()
 
     # Post initialization
     def __post_init__(self) -> None:
         """Post initialization."""
         # general settings
         self.decimation = 2
-        self.episode_length_s = 5
+        self.episode_length_s = 20.0
         # viewer settings
         self.viewer.eye = (8.0, 0.0, 5.0)
         # simulation settings
         self.sim.dt = 1 / 120
         self.sim.render_interval = self.decimation
+        self.sim.physical_material = self.scene.terrain.physics_material
+        self.sim.physx.gpu_max_rigid_patch_count = 10 * 2**15
+
+        # update sesor update periods
+        # tick all sensors based on the smallest update period (physics update period)
+
+        if self.scene.contact_forces is not None:
+            self.scene.contact_forces.update_period = self.sim.dt
