@@ -78,7 +78,7 @@ class CommandsCfg:
         resampling_time_range=(10.0, 20.0),
         rel_standing_envs=0.02,
         rel_heading_envs=1.0,
-        heading_commands=True,
+        heading_command=True,
         heading_control_stiffness=0.5,
         debug_vis=True,
         ranges=mdp.UniformVelocityCommandCfg.Ranges(
@@ -122,7 +122,7 @@ class ObservationsCfg:
         )
 
 
-        velocity_command = ObsTerm(func=mdp.genereated_commands, params={"command_names": "base_velocity"})
+        velocity_command = ObsTerm(func=mdp.generated_commands, params={"command_names": "base_velocity"})
         joint_pos = ObsTerm(func=mdp.joint_pos_rel, noise=Unoise(n_min=-0.01, n_max=0.01))
         joint_vel = ObsTerm(func=mdp.joint_vel_rel, noise=Unoise(n_min=-1.5, n_max=1.5))
 
