@@ -191,13 +191,14 @@ class EventCfg:
         mode="reset",
         params={
             "pose_range": {"x": (-0.5, 0.5), "y": (-0.5, 0.5), "yaw": (-3.14, 3.14)},
+            # start at rest — a humanoid spawned with random body velocities tips over instantly
             "velocity_range": {
-                "x": (-0.5, 0.5),
-                "y": (-0.5, 0.5),
-                "z": (-0.5, 0.5),
-                "roll": (-0.5, 0.5),
-                "pitch": (-0.5, 0.5),
-                "yaw": (-0.5, 0.5),
+                "x": (0.0, 0.0),
+                "y": (0.0, 0.0),
+                "z": (0.0, 0.0),
+                "roll": (0.0, 0.0),
+                "pitch": (0.0, 0.0),
+                "yaw": (0.0, 0.0),
             },
         },
     )
@@ -206,7 +207,8 @@ class EventCfg:
         func=mdp.reset_joints_by_scale,
         mode="reset",
         params={
-            "position_range": (0.5, 1.5),
+            # start in the exact default stance (no scaling); (0.5, 1.5) spawns half-collapsed legs
+            "position_range": (1.0, 1.0),
             "velocity_range": (0.0, 0.0),
         },
     )
@@ -256,6 +258,12 @@ class RewardsCfg:
         weight=-0.05,
     )
 
+    # keep the torso level — important for staying upright
+    flat_orientation_l2 = RewTerm(
+        func=mdp.flat_orientation_l2,
+        weight=-1.0,
+    )
+
     # duplicate of dof_torques_l2 below (penalizes all-joint torques) — disabled to avoid double-counting
     # joint_torques_l2 = RewTerm(
     #     func=mdp.joint_torques_l2,
@@ -269,7 +277,7 @@ class RewardsCfg:
 
     dof_torques_l2 = RewTerm(
         func=mdp.joint_torques_l2,
-        weight=-2.0e-5,
+        weight=-2.0e-6,
         params={"asset_cfg": SceneEntityCfg("robot", joint_names=[".*_hip_.*", ".*_knee_joint"])}
     )
 
@@ -300,14 +308,16 @@ class RewardsCfg:
         },
     )
 
-    undersired_contacts = RewTerm(
-        func=mdp.undesired_contacts,
-        weight=-1.0,
-        params={
-            "sensor_cfg": SceneEntityCfg("contact_forces", body_names=[".*_hip_yaw_link", ".*_hip_roll_link", ".*_knee_link"]), # check the body name
-            "threshold": 1.0,
-        }
-    )
+    # NOTE: disabled to match the official G1 config — G1's hip/knee collision meshes register
+    # spurious contacts during a normal gait, and a -1.0 penalty there suppresses natural leg motion.
+    # undersired_contacts = RewTerm(
+    #     func=mdp.undesired_contacts,
+    #     weight=-1.0,
+    #     params={
+    #         "sensor_cfg": SceneEntityCfg("contact_forces", body_names=[".*_hip_yaw_link", ".*_hip_roll_link", ".*_knee_link"]),
+    #         "threshold": 1.0,
+    #     }
+    # )
 
     # Penalize ankle joint limits
     dof_pos_limits = RewTerm(
@@ -370,10 +380,19 @@ class TerminationsCfg:
 
     # (1) Time out
     time_out = DoneTerm(func=mdp.time_out, time_out=True)
-    # (2) agent fall
+    # (2) agent fall: illegal contact on the trunk (pelvis or torso hitting the ground)
     base_contact = DoneTerm(
         func=mdp.illegal_contact,
-        params={"sensor_cfg": SceneEntityCfg("contact_forces", body_names="pelvis"), "threshold": 1.0},
+        params={
+            "sensor_cfg": SceneEntityCfg("contact_forces", body_names=["pelvis", "torso_link"]),
+            "threshold": 1.0,
+        },
+    )
+    # (3) agent fall: torso tipped too far from upright (catches fall modes where
+    #     arms/knees/face hit the ground first and the trunk never registers contact)
+    bad_orientation = DoneTerm(
+        func=mdp.bad_orientation,
+        params={"limit_angle": 1.0},  # radians (~57 deg) between gravity and base -z
     )
 
 
@@ -399,12 +418,13 @@ class G1LocomotionEnvCfg(ManagerBasedRLEnvCfg):
     def __post_init__(self) -> None:
         """Post initialization."""
         # general settings
-        self.decimation = 2
+        # 200 Hz physics, 50 Hz control (dt * decimation = 0.02) — matches the G1 actuator gains
+        self.decimation = 4
         self.episode_length_s = 20.0
         # viewer settings
         self.viewer.eye = (8.0, 0.0, 5.0)
         # simulation settings
-        self.sim.dt = 1 / 120
+        self.sim.dt = 0.005
         self.sim.render_interval = self.decimation
         self.sim.physx.gpu_max_rigid_patch_count = 10 * 2**15
 
