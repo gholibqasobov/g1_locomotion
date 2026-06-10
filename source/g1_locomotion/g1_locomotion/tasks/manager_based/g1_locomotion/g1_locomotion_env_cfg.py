@@ -122,7 +122,7 @@ class ObservationsCfg:
         )
 
 
-        velocity_command = ObsTerm(func=mdp.generated_commands, params={"command_names": "base_velocity"})
+        velocity_command = ObsTerm(func=mdp.generated_commands, params={"command_name": "base_velocity"})
         joint_pos = ObsTerm(func=mdp.joint_pos_rel, noise=Unoise(n_min=-0.01, n_max=0.01))
         joint_vel = ObsTerm(func=mdp.joint_vel_rel, noise=Unoise(n_min=-1.5, n_max=1.5))
 
@@ -144,6 +144,7 @@ class EventCfg:
 
     # startup
     physics_material = EventTerm(
+        func=mdp.randomize_rigid_body_material,
         mode="startup",
         params={
             "asset_cfg": SceneEntityCfg("robot", body_names=".*"),
@@ -155,18 +156,20 @@ class EventCfg:
     )
 
     add_base_mass = EventTerm(
+        func=mdp.randomize_rigid_body_mass,
         mode="startup",
         params={
-            "asset_cfg": SceneEntityCfg("robot", body_names="base"),
+            "asset_cfg": SceneEntityCfg("robot", body_names="pelvis"),
             "mass_distribution_params": (-0.5, 5.0),
             "operation": "add",
         }
     )
 
     base_com = EventTerm(
+        func=mdp.randomize_rigid_body_com,
         mode="startup",
         params={
-            "asset_cfg": SceneEntityCfg("robot", body_names="base"),
+            "asset_cfg": SceneEntityCfg("robot", body_names="pelvis"),
             "com_range": {"x": (-0.05, 0.05), "y": (-0.05, 0.05), "z": (-0.01, 0.01)},
         }
     )
@@ -177,7 +180,7 @@ class EventCfg:
         func=mdp.apply_external_force_torque,
         mode="reset",
         params={
-            "asset_cfg": SceneEntityCfg("robot", body_names="base"),
+            "asset_cfg": SceneEntityCfg("robot", body_names="pelvis"),
             "force_range": (0.0, 0.0),
             "torque_range": (-0.0, 0.0),
         },
@@ -253,10 +256,11 @@ class RewardsCfg:
         weight=-0.05,
     )
 
-    joint_torques_l2 = RewTerm(
-        func=mdp.joint_pos_target_l2,
-        weight=-1.0e-5,
-    )
+    # duplicate of dof_torques_l2 below (penalizes all-joint torques) — disabled to avoid double-counting
+    # joint_torques_l2 = RewTerm(
+    #     func=mdp.joint_torques_l2,
+    #     weight=-1.0e-5,
+    # )
 
     joint_acc_l2 = RewTerm(
         func=mdp.joint_acc_l2,
@@ -264,13 +268,13 @@ class RewardsCfg:
     )
 
     dof_torques_l2 = RewTerm(
-        func=mdp.joint_torques_l2, 
+        func=mdp.joint_torques_l2,
         weight=-2.0e-5,
         params={"asset_cfg": SceneEntityCfg("robot", joint_names=[".*_hip_.*", ".*_knee_joint"])}
-    )           
-                             
-                             
-    dof_acc_l2 = RewTerm(func=mdp.joint_acc_l2, weight=-1.0e-7)
+    )
+
+    # duplicate of joint_acc_l2 above (same func, all joints) — disabled to avoid double-counting
+    # dof_acc_l2 = RewTerm(func=mdp.joint_acc_l2, weight=-1.0e-7)
 
     action_rate_l2 = RewTerm(
         func=mdp.action_rate_l2,
@@ -369,7 +373,7 @@ class TerminationsCfg:
     # (2) agent fall
     base_contact = DoneTerm(
         func=mdp.illegal_contact,
-        params={"sensor_cfg": SceneEntityCfg("contact_forces", body_names="base")},
+        params={"sensor_cfg": SceneEntityCfg("contact_forces", body_names="pelvis"), "threshold": 1.0},
     )
 
 
@@ -402,7 +406,6 @@ class G1LocomotionEnvCfg(ManagerBasedRLEnvCfg):
         # simulation settings
         self.sim.dt = 1 / 120
         self.sim.render_interval = self.decimation
-        self.sim.physical_material = self.scene.terrain.physics_material
         self.sim.physx.gpu_max_rigid_patch_count = 10 * 2**15
 
         # update sesor update periods
