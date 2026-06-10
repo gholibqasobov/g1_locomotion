@@ -44,7 +44,8 @@ class G1LocomotionSceneCfg(InteractiveSceneCfg):
     # ground plane
     ground = AssetBaseCfg(
         prim_path="/World/ground",
-        spawn=sim_utils.GroundPlaneCfg(size=(100.0, 100.0)),
+        # spawn=sim_utils.GroundPlaneCfg(size=(100.0, 100.0)),
+        spawn=sim_utils.GroundPlaneCfg(),
     )
 
     # robot
@@ -79,11 +80,11 @@ class CommandsCfg:
         rel_heading_envs=1.0,
         heading_commands=True,
         heading_control_stiffness=0.5,
-        debug_vis=True
+        debug_vis=True,
         ranges=mdp.UniformVelocityCommandCfg.Ranges(
-            lin_vel_x=(-1.0, 1.0),
-            lin_vel_y=(-1.0, 1.0),
-            ang_vel_z==(-1.0, 1.0),
+            lin_vel_x=(0.0, 1.0),
+            lin_vel_y=(-0.5, 0.5),
+            ang_vel_z=(-1.0, 1.0),
             heading=(-math.pi, math.pi),
         ),
     )
@@ -220,9 +221,11 @@ class EventCfg:
 class RewardsCfg:
     """Reward terms for the MDP."""
 
+    termination_penalty = RewTerm(func=mdp.is_terminated, weight=-200.0)
+
     # --task
     track_lin_vel_xy_exp = RewTerm(
-        func=mdp.track_lin_vel_xy_exp, 
+        func=mdp.track_lin_vel_xy_yaw_frame_exp, 
         weight=1.0, 
         params={
             "command_name": "base_velocity", 
@@ -231,19 +234,18 @@ class RewardsCfg:
     )
 
     track_ang_vel_z_exp = RewTerm(
-        func=mdp.track_ang_vel_z_exp,
-        weight=0.5,
+        func=mdp.track_ang_vel_z_world_exp,
+        weight=1.0,
         params={
             "command_name": "base_velocity", 
             "std": math.sqrt(0.25)
             }
     )
 
-
     # --pentalties
     lin_vel_z_l2 = RewTerm(
         func=mdp.lin_vel_z_l2,
-        weight=-2.0,
+        weight=-0.2,
     )
 
     ang_vel_xy_l2 = RewTerm(
@@ -261,28 +263,98 @@ class RewardsCfg:
         weight=-2.5e-7,
     )
 
+    dof_torques_l2 = RewTerm(
+        func=mdp.joint_torques_l2, 
+        weight=-2.0e-5,
+        params={"asset_cfg": SceneEntityCfg("robot", joint_names=[".*_hip_.*", ".*_knee_joint"])}
+    )           
+                             
+                             
+    dof_acc_l2 = RewTerm(func=mdp.joint_acc_l2, weight=-1.0e-7)
+
     action_rate_l2 = RewTerm(
         func=mdp.action_rate_l2,
-        weight=-0.01,
+        weight=-0.005,
     )
 
     feet_air_time = RewTerm(
         func=mdp.feet_air_time_positive_biped,
-        weight=0.125,
+        weight=0.75,
         params={
-            "sensor_cfg": SceneEntityCfg("contact_forces", body_names=".*foot.*"), # check the body name
+            "sensor_cfg": SceneEntityCfg("contact_forces", body_names=[".*_ankle_roll_link"]), # check the foot name
             "command_name": "base_velocity",
-            "threshold": 0.5,
+            "threshold": 0.4,
         }
+    )
+
+    feet_slide = RewTerm(
+        func=mdp.feet_slide,
+        weight=-0.1,
+        params={
+            "sensor_cfg": SceneEntityCfg("contact_forces", body_names=".*_ankle_roll_link"),
+            "asset_cfg": SceneEntityCfg("robot", body_names=".*_ankle_roll_link"),
+        },
     )
 
     undersired_contacts = RewTerm(
         func=mdp.undesired_contacts,
         weight=-1.0,
         params={
-            "sensor_cfg": SceneEntityCfg("contact_forces", body_names=".*THIGH"), # check the body name
+            "sensor_cfg": SceneEntityCfg("contact_forces", body_names=[".*_hip_yaw_link", ".*_hip_roll_link", ".*_knee_link"]), # check the body name
             "threshold": 1.0,
         }
+    )
+
+    # Penalize ankle joint limits
+    dof_pos_limits = RewTerm(
+        func=mdp.joint_pos_limits,
+        weight=-1.0,
+        params={"asset_cfg": SceneEntityCfg("robot", joint_names=[".*_ankle_pitch_joint", ".*_ankle_roll_joint"])},
+    )
+    # Penalize deviation from default of the joints that are not essential for locomotion
+    joint_deviation_hip = RewTerm(
+        func=mdp.joint_deviation_l1,
+        weight=-0.1,
+        params={"asset_cfg": SceneEntityCfg("robot", joint_names=[".*_hip_yaw_joint", ".*_hip_roll_joint"])},
+    )
+    joint_deviation_arms = RewTerm(
+        func=mdp.joint_deviation_l1,
+        weight=-0.1,
+        params={
+            "asset_cfg": SceneEntityCfg(
+                "robot",
+                joint_names=[
+                    ".*_shoulder_pitch_joint",
+                    ".*_shoulder_roll_joint",
+                    ".*_shoulder_yaw_joint",
+                    ".*_elbow_pitch_joint",
+                    ".*_elbow_roll_joint",
+                ],
+            )
+        },
+    )
+    joint_deviation_fingers = RewTerm(
+        func=mdp.joint_deviation_l1,
+        weight=-0.05,
+        params={
+            "asset_cfg": SceneEntityCfg(
+                "robot",
+                joint_names=[
+                    ".*_five_joint",
+                    ".*_three_joint",
+                    ".*_six_joint",
+                    ".*_four_joint",
+                    ".*_zero_joint",
+                    ".*_one_joint",
+                    ".*_two_joint",
+                ],
+            )
+        },
+    )
+    joint_deviation_torso = RewTerm(
+        func=mdp.joint_deviation_l1,
+        weight=-0.1,
+        params={"asset_cfg": SceneEntityCfg("robot", joint_names="torso_joint")},
     )
 
 
