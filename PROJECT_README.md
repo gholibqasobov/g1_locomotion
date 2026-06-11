@@ -211,3 +211,126 @@ If the policy still struggles after the fixes:
 Compare against the upstream configs that this project mirrors:
 `IsaacLab/source/isaaclab_tasks/isaaclab_tasks/manager_based/locomotion/velocity/config/g1/`
 (`flat_env_cfg.py`, `rough_env_cfg.py`) and the shared base `velocity_env_cfg.py`.
+
+---
+
+# Stair climbing (teacher–student distillation)
+
+A second, separate project that extends the flat policy to **stairs / rough terrain** using a
+head-mounted **Intel RealSense D435** depth camera as the deployable sensor. The flat task above is
+**untouched** — all of this lives in new files and new task IDs.
+
+## Approach (why it's built this way)
+
+Research consensus (2024–2026) for perceptive humanoid locomotion: a privileged **height-scanner
+teacher** is fast and stable to train, but a height map is not something the real robot has. An
+**egocentric depth camera** *is* deployable and has the smaller sim-to-real modality gap — so we train
+the teacher on the height scanner, then **distill** it into a student that sees only the depth camera.
+This is the standard teacher–student recipe and is supported natively by RSL-RL.
+
+- **Teacher** — `Template-G1-Stairs-Teacher-v0`: observes a top-down **height scanner** (privileged).
+  Trained with PPO (`OnPolicyRunner`).
+- **Student** — `Template-G1-Stairs-Student-v0`: the policy observes only the **RealSense D435 depth
+  image**; a second `teacher` observation group reproduces the height-scan input so the pretrained
+  teacher network loads 1:1. Trained with `DistillationRunner`.
+
+> Teacher–student is inherently **two runs** (the student imitates a teacher that must already exist).
+> It is not one script — that's a property of distillation, not a limitation here.
+
+## Sensors
+
+| | Height scanner (teacher) | RealSense D435 depth (student) |
+|---|---|---|
+| Type | `RayCasterCfg` + `GridPatternCfg` | `RayCasterCameraCfg` + `PinholeCameraPatternCfg` |
+| Mount | `torso_link`, top-down | `head_link`, pitched **42.4° down** |
+| Output | 17×11 = **187** height samples | **64×36** depth image → flattened to **2304** |
+| FOV | grid 1.6×1.0 m | ~87°×58° (matches D435 depth), range clipped to 5 m |
+| Realism | privileged (not a real sensor) | egocentric depth + light noise/clip randomization |
+
+The depth image is **downsampled and flattened into the MLP** (no CNN) — required because RSL-RL's
+`StudentTeacher` module is MLP-only (1-D observations). The camera offset/intrinsics are sensible
+defaults; **verify and tune them with the debug visualizer** (below).
+
+## How to run
+
+```bash
+# 1) Train the teacher (height scanner + PPO)
+python scripts/rsl_rl/train.py --task=Template-G1-Stairs-Teacher-v0 --headless
+#    -> logs/rsl_rl/g1_stairs_teacher/<timestamp>/
+
+# 2) Distill the student (depth camera), loading the teacher checkpoint
+python scripts/rsl_rl/train.py --task=Template-G1-Stairs-Student-v0 \
+       --load_run <teacher_timestamp> --headless
+#    train.py auto-loads the teacher weights when the runner is a Distillation runner
+
+# Evaluate
+python scripts/rsl_rl/play.py --task=Template-G1-Stairs-Teacher-Play-v0 --num_envs 32
+python scripts/rsl_rl/play.py --task=Template-G1-Stairs-Student-Play-v0 --num_envs 32
+```
+
+## Debug visualizer (check sensor placement)
+
+```bash
+# interactive viewer — shows the height-scan hit points + the camera frustum on the head
+python scripts/debug/visualize_sensors.py --num_envs 4
+
+# also dump a depth snapshot from env 0 (writes logs/debug/depth_env0.npy + .png)
+python scripts/debug/visualize_sensors.py --num_envs 4 --save_depth --enable_cameras
+
+# inspect the student task instead
+python scripts/debug/visualize_sensors.py --task Template-G1-Stairs-Student-v0
+```
+
+It enables `debug_vis` on the terrain, height scanner, and camera, runs the robot idle, and prints
+live sensor shapes. **Tip:** run with `PYTHONUNBUFFERED=1` (or watch the viewer) — when stdout is
+redirected to a file, the Python prints are block-buffered and can be lost on shutdown while the
+C++ Kit logs still appear.
+
+To re-aim the camera, edit the constants at the top of
+`tasks/manager_based/g1_locomotion/g1_stairs_env_cfg.py`:
+`_CAM_DOWN_PITCH_QUAT` (down-pitch quaternion), the `camera.offset.pos` (mount point on the head),
+and `_CAM_WIDTH/_CAM_HEIGHT` + aperture (resolution / FOV).
+
+## New files (flat task untouched)
+
+| File | Purpose |
+|---|---|
+| `tasks/manager_based/g1_locomotion/stairs_terrains.py` | `G1_STAIRS_TERRAINS_CFG` — stairs-weighted, curriculum-enabled terrain (level 0 ≈ flat → tall steps) |
+| `tasks/manager_based/g1_locomotion/g1_stairs_env_cfg.py` | Scene (terrain + height scanner + D435 camera), obs groups, curriculum, teacher/student env cfgs (+ PLAY) |
+| `tasks/manager_based/g1_locomotion/agents/rsl_rl_stairs_cfg.py` | `G1StairTeacherPPORunnerCfg` + `G1StairDistillRunnerCfg` |
+| `scripts/debug/visualize_sensors.py` | Sensor-placement debug visualizer |
+| `__init__.py` (edited) | Registers the 4 new stairs task IDs |
+
+## Curriculum: flat → harder
+
+`G1_STAIRS_TERRAINS_CFG` has `curriculum=True` with `num_rows` difficulty levels; step heights ramp
+from ~2 cm (row 0 ≈ flat) to ~18 cm (last row). The scene sets `max_init_terrain_level=0` so every
+robot **starts on the flat level**, and `mdp.terrain_levels_vel` promotes a robot to harder stairs
+only once it travels far enough (and demotes it if it fails). So training literally starts flat and
+gets harder as competence grows.
+
+## Validated
+
+Both envs were smoke-tested (`scripts/debug/visualize_sensors.py`, headless). Confirmed:
+- Teacher `policy` obs = **310** (proprio 123 + height_scan 187).
+- Student `policy` obs = **2427** (proprio 123 + depth 2304); student `teacher` obs = **310**
+  (identical to the teacher's policy → distillation weight-load matches).
+- Depth camera raycasts the terrain (range ~0.7–4.5 m); height scanner returns 187 points.
+- No observation-concatenation errors; reset + stepping clean.
+
+## Tuning / gotchas
+
+- **Run the teacher first.** The student run **requires** `--load_run <teacher>`; `DistillationRunner`
+  raises "Teacher model parameters not loaded" otherwise.
+- **Teacher/student net sizes are linked.** `teacher_hidden_dims` in the distillation cfg **must equal**
+  the teacher PPO `actor_hidden_dims` (`[512, 256, 128]`) — the loader maps the PPO `actor.*` weights
+  into the teacher network. Change both together.
+- **Warp note:** the height scanner and depth camera are Warp ray-casters (unlike the flat task, which
+  used only PhysX contact sensors). The `cuDeviceGetUuid` lines Isaac Sim prints are benign warnings —
+  Warp ray-casting works (verified on the RTX 5080 / CUDA 12.8 setup here).
+- **Depth realism is minimal for now** (range clip + additive noise). To close the sim-to-real gap
+  further, add pixel dropout / edge holes / latency to the depth term — the "realistic depth synthesis"
+  the literature emphasizes.
+- **Reference:** mirrors Isaac Lab's `…/locomotion/velocity/config/g1/rough_env_cfg.py` (height scanner,
+  terrain curriculum) plus the native RSL-RL distillation API in
+  `isaaclab_rl/rsl_rl/distillation_cfg.py`.
